@@ -21,21 +21,6 @@ API_BASE_URL = "https://www.zefix.admin.ch/ZefixPublicREST/api/v1"
 USERNAME = os.getenv("API_USERNAME")
 PASSWORD = os.getenv("API_PASSWORD")
 
-# Language to spaCy model mapping
-LANGUAGE_MODELS = {
-    "de": nlp_de,
-    "it": nlp_it,
-    "fr": nlp_fr
-}
-
-# Blacklist of irrelevant terms
-BLACKLIST_TERMS = [
-    "Statuts", "Feuille", "Organe", "Publ", "TYPE", "Zweck", "FT", "AG", "Officielle Suisse du Commerce"
-]
-
-VALID_NAME_PARTICLES = {"da", "de", "van", "von", "del", "dos", "du", "di", "la", "le", "der"}
-
-
 def clean_text(text):
     """
     Clean the input text by removing HTML entities and normalizing whitespace.
@@ -45,51 +30,6 @@ def clean_text(text):
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     return text
-
-def filter_names(names):
-    """
-    Filter out non-names based on the blacklist, structural checks, and specific fragment cleaning,
-    while preserving valid name particles like 'da', 'de', 'von', etc.
-    """
-    filtered_names = []
-    for name in names:
-        original_name = name
-
-        # Remove blacklisted terms entirely
-        for term in BLACKLIST_TERMS:
-            if term in name:
-                print(f"Removed '{term}' from '{original_name}' due to blacklist.")
-                name = name.replace(term, "").strip()
-
-        # Remove specific patterns like "CHE-328.335.041</" or similar
-        name = re.sub(r"CHE-\d+\.\d+\.\d+<.*?>", "", name)  # Remove "CHE-XXX.XXX.XXX</...>"
-        name = re.sub(r"CHE-\d+\.\d+\.\d+", "", name)  # Remove "CHE-XXX.XXX.XXX"
-        name = re.sub(r"<[^>]*>", "", name)  # Remove tags like "<...>"
-        name = re.sub(r'=[^>]*>', '', name)  # Remove fragments like "=\"...\">"
-
-        # Remove dangling semicolons, extra whitespace, and ensure the name is valid
-        name = re.sub(r'\s+;\s*$', '', name)  # Remove trailing semicolons
-        name = re.sub(r'^[;\s]+|[;\s]+$', '', name)  # Remove leading/trailing semicolons or whitespace
-        name = re.sub(r'\s+', ' ', name).strip()  # Normalize whitespace
-
-        # Allow valid particles in names (e.g., 'da', 'de', 'von')
-        words = name.split()
-        valid_particles = set(VALID_NAME_PARTICLES)
-        valid = all(
-            word.isalpha() or word.lower() in valid_particles or "-" in word
-            for word in words
-        )
-
-        # Ensure name isn't empty after cleaning
-        if not valid or not words or not name.strip():
-            print(f"Removed '{original_name}' for not meeting name criteria.")
-            continue
-
-        # Reconstruct the cleaned and validated name
-        reconstructed_name = " ".join(words)
-        filtered_names.append(reconstructed_name)
-
-    return filtered_names
 
 def search_companies(search_key):
     url = f"{API_BASE_URL}/company/search"
@@ -114,56 +54,127 @@ def search_companies(search_key):
 
     return results
 
-def detect_language_and_extract(text):
-    """
-    Detect the language of the text and extract person names using the appropriate model.
-    """
-
-    text = clean_text(text) # Clean text before processing
-    try:
-        lang = detect(text)  # Detect the language
-        model = LANGUAGE_MODELS.get(lang)
-        if model:
-            names = extract_names_with_model(text, model)
-            return filter_names(names)
-        else:
-            print(f"Unsupported language detected: {lang}")
-            return []
-    except Exception as e:
-        print(f"Language detection failed for text: {text}. Error: {str(e)}")
-        return []
-
-def extract_names_with_model(text, model):
-    """
-    Extract names using a specific spaCy language model, ensuring multi-word names are preserved.
-    """
-    doc = model(text)
-    names = []
-    for ent in doc.ents:
-        if ent.label_ == "PER":  # Extract PERSON entities
-            # Add additional logic to check and preserve particles
-            cleaned_name = " ".join([
-                token.text for token in ent
-                if token.text.lower() not in BLACKLIST_TERMS
-            ])
-            names.append(cleaned_name.strip())
-    return names
-
-
 def extract_person_names(sogc_pub):
     """
-    Extract person names from sogcPub using multilingual processing.
+    Extract person names from sogcPub, excluding irrelevant numerical data
+    (e.g., '000', 'parts de CHF', '1'000.00') and financial patterns.
+    Supports German, French, and Italian name extraction patterns.
     """
-    person_names = []
+    person_names = set()
+    removed_names = set()
+
     for pub in sogc_pub:
         message = pub.get("message", "")
-        if message:
-            names = detect_language_and_extract(message)  # Detect language and extract names
-            person_names.extend(names)
+        if not message:
+            continue
+
+        # Process for Eingetragene Personen (German)
+        eingetragene_section = re.search(r"Eingetragene Personen.*?:", message)
+        if eingetragene_section:
+            start_idx = eingetragene_section.end()
+            while start_idx < len(message):
+                semicolon_idx = message.find(";", start_idx)
+                if semicolon_idx == -1:
+                    semicolon_idx = len(message)
+                segment = message[start_idx:semicolon_idx].strip()
+
+                # Skip segments with financial patterns or standalone numeric data
+                if re.search(r"parts? de CHF", segment, re.IGNORECASE) or re.search(r"\d+['.]?\d*\.\d{2}", segment) or re.match(r"^\d+$", segment):
+                    start_idx = semicolon_idx + 1
+                    continue
+
+                # Remove apostrophes and clean the segment
+                segment = re.sub(r"'", "", segment)
+                comma_splits = segment.split(",", 2)
+                if len(comma_splits) >= 2:
+                    last_name = comma_splits[0].strip()
+                    first_name = comma_splits[1].strip()
+                    if ";" not in segment:
+                        full_name = f"{last_name}, {first_name}"
+                        person_names.add(full_name)
+
+                start_idx = semicolon_idx + 1
+
+        # Process for Ausgeschiedene Personen (German)
+        ausgeschiedene_section = re.search(r"Ausgeschiedene Personen.*?:", message)
+        if ausgeschiedene_section:
+            start_idx = ausgeschiedene_section.end()
+            while start_idx < len(message):
+                semicolon_idx = message.find(";", start_idx)
+                if semicolon_idx == -1:
+                    semicolon_idx = len(message)
+                segment = message[start_idx:semicolon_idx].strip()
+
+                # Skip segments with financial patterns or standalone numeric data
+                if re.search(r"parts? de CHF", segment, re.IGNORECASE) or re.search(r"\d+['.]?\d*\.\d{2}", segment) or re.match(r"^\d+$", segment):
+                    start_idx = semicolon_idx + 1
+                    continue
+
+                # Remove apostrophes and clean the segment
+                segment = re.sub(r"'", "", segment)
+                comma_splits = segment.split(",", 2)
+                if len(comma_splits) >= 2:
+                    last_name = comma_splits[0].strip()
+                    first_name = comma_splits[1].strip()
+                    if ";" not in segment:
+                        full_name = f"{last_name}, {first_name}"
+                        removed_names.add(full_name)
+
+                start_idx = semicolon_idx + 1
+
+        # Process for French patterns (including Personne inscrite)
+        for pattern in [
+            r"Titulaire.*?:", r"Associés-gérants.*?:", r"Personne inscrite.*?:", r"Personne\(s\) inscrite\(s\).*?:"
+        ]:
+            section = re.search(pattern, message)
+            if section:
+                start_idx = section.end()
+                while start_idx < len(message):
+                    comma_idx = message.find(",", start_idx)
+                    if comma_idx == -1:
+                        break
+                    full_name = message[start_idx:comma_idx].strip()
+                    if not re.search(r"parts? de CHF", full_name, re.IGNORECASE) and not re.search(r"\d+['.]?\d*\.\d{2}", full_name) and not re.match(r"^\d+$", full_name):
+                        full_name = re.sub(r"'", "", full_name)
+                        person_names.add(full_name)
+
+                    semicolon_idx = message.find(";", start_idx)
+                    if semicolon_idx == -1:
+                        break
+                    start_idx = semicolon_idx + 1
+
+        # Process for Persone iscritte (Italian)
+        italian_section = re.search(r"Persone iscritte.*?:", message)
+        if italian_section:
+            start_idx = italian_section.end()
+            while start_idx < len(message):
+                semicolon_idx = message.find(";", start_idx)
+                if semicolon_idx == -1:
+                    semicolon_idx = len(message)
+                segment = message[start_idx:semicolon_idx].strip()
+
+                # Skip segments with financial patterns or standalone numeric data
+                if re.search(r"parts? de CHF", segment, re.IGNORECASE) or re.search(r"\d+['.]?\d*\.\d{2}", segment) or re.match(r"^\d+$", segment):
+                    start_idx = semicolon_idx + 1
+                    continue
+
+                # Remove apostrophes and clean the segment
+                segment = re.sub(r"'", "", segment)
+                comma_splits = segment.split(",", 2)
+                if len(comma_splits) >= 2:
+                    last_name = comma_splits[0].strip()
+                    first_name = comma_splits[1].strip()
+                    if ";" not in segment:
+                        full_name = f"{last_name}, {first_name}"
+                        person_names.add(full_name)
+
+                start_idx = semicolon_idx + 1
+
+    # Filter out removed names from the final list
+    final_names = person_names - removed_names
 
     # Deduplicate and join names
-    unique_names = list(set(person_names))
-    return "; ".join(unique_names) if unique_names else "No names found"
+    return "; ".join(final_names) if final_names else "No names found"
 
 def get_company_details(uid):
     url = f"{API_BASE_URL}/company/uid/{uid}"
