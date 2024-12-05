@@ -56,11 +56,10 @@ def search_companies(search_key):
 
 def extract_person_names(sogc_pub):
     """
-    Extract person names from sogcPub, excluding irrelevant numerical data
-    (e.g., '000', 'parts de CHF', '1'000.00') and financial patterns.
-    Supports German, French, and Italian name extraction patterns.
+    Extract person names from sogcPub in the format [firstName1, lastName1, firstName2, lastName2].
+    If first and last names cannot be distinguished, return a flat list of names [name1, name2, ...].
     """
-    person_names = set()
+    person_names = []
     removed_names = set()
 
     for pub in sogc_pub:
@@ -89,9 +88,9 @@ def extract_person_names(sogc_pub):
                 if len(comma_splits) >= 2:
                     last_name = comma_splits[0].strip()
                     first_name = comma_splits[1].strip()
-                    if ";" not in segment:
-                        full_name = f"{last_name}, {first_name}"
-                        person_names.add(full_name)
+                    person_names.extend([first_name, last_name])  # Add as [firstName, lastName]
+                else:
+                    person_names.append(segment.strip())  # Add as a single name if no distinction possible
 
                 start_idx = semicolon_idx + 1
 
@@ -116,9 +115,9 @@ def extract_person_names(sogc_pub):
                 if len(comma_splits) >= 2:
                     last_name = comma_splits[0].strip()
                     first_name = comma_splits[1].strip()
-                    if ";" not in segment:
-                        full_name = f"{last_name}, {first_name}"
-                        removed_names.add(full_name)
+                    removed_names.add(f"{first_name},{last_name}")
+                else:
+                    removed_names.add(segment.strip())
 
                 start_idx = semicolon_idx + 1
 
@@ -136,7 +135,7 @@ def extract_person_names(sogc_pub):
                     full_name = message[start_idx:comma_idx].strip()
                     if not re.search(r"parts? de CHF", full_name, re.IGNORECASE) and not re.search(r"\d+['.]?\d*\.\d{2}", full_name) and not re.match(r"^\d+$", full_name):
                         full_name = re.sub(r"'", "", full_name)
-                        person_names.add(full_name)
+                        person_names.append(full_name)
 
                     semicolon_idx = message.find(";", start_idx)
                     if semicolon_idx == -1:
@@ -164,17 +163,21 @@ def extract_person_names(sogc_pub):
                 if len(comma_splits) >= 2:
                     last_name = comma_splits[0].strip()
                     first_name = comma_splits[1].strip()
-                    if ";" not in segment:
-                        full_name = f"{last_name}, {first_name}"
-                        person_names.add(full_name)
+                    person_names.extend([first_name, last_name])  # Add as [firstName, lastName]
+                else:
+                    person_names.append(segment.strip())  # Add as a single name if no distinction possible
 
                 start_idx = semicolon_idx + 1
 
-    # Filter out removed names from the final list
-    final_names = person_names - removed_names
+    # Filter out removed names
+    final_names = [
+        name for name in person_names
+        if name not in {n.split(",")[0] for n in removed_names}  # Remove by first name if distinction exists
+    ]
 
-    # Deduplicate and join names
-    return "; ".join(final_names) if final_names else "No names found"
+    # Return the names as a flat list
+    return final_names if final_names else ["No names found"]
+
 
 def get_company_details(uid):
     url = f"{API_BASE_URL}/company/uid/{uid}"
